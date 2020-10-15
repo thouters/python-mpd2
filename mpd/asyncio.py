@@ -25,7 +25,7 @@ from mpd.base import HELLO_PREFIX, ERROR_PREFIX, SUCCESS
 from mpd.base import MPDClientBase
 from mpd.base import MPDClient as SyncMPDClient
 from mpd.base import ProtocolError, ConnectionError, CommandError
-from mpd.base import mpd_command_provider
+from mpd.base import mpd_command_provider, binary_chunk
 
 class BaseCommandResult(asyncio.Future):
     """A future that carries its command/args/callback with it for the
@@ -215,7 +215,7 @@ class MPDClient(MPDClientBase):
                                 field, val = l.split(": ")
                                 chunk_size = int(val)
                                 binarychunk = await self._read_chunk(chunk_size+1)
-                                result._feed_line(binarychunk[:-1])
+                                result._feed_line(binary_chunk(binarychunk[:-1]))
                                 offset += chunk_size
                                 # OK after data
                                 l = await self.__read_output_line()
@@ -345,10 +345,10 @@ class MPDClient(MPDClientBase):
                     line = await lines.get()
                     if isinstance(line, BaseException):
                         raise line
-                    if isinstance(line, bytes):
+                    if isinstance(line, binary_chunk):
                         if "binary" not in self.obj.keys():
                             self.obj["binary"] = bytearray()
-                        self.obj["binary"] += line
+                        self.obj["binary"] += line.data
                         continue
                     if line is None:
                         self.exhausted = True

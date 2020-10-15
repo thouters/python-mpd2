@@ -105,7 +105,9 @@ class PendingCommandError(MPDError):
 class IteratingError(MPDError):
     pass
 
-
+class binary_chunk(object):
+    def __init__(self,data):
+        self.data = data
 ###############################################################################
 # command registration
 ###############################################################################
@@ -224,10 +226,10 @@ class MPDClientBase(object):
     def _parse_objects(self, lines, delimiters=[], lookup_delimiter=False):
         obj = {}
         for line in lines:
-            if isinstance(line, bytes):
+            if isinstance(line, binary_chunk):
                 if "binary" not in obj.keys():
                     obj["binary"] = bytearray()
-                obj["binary"] += line
+                obj["binary"] += line.data
                 continue
             if line is None:
                 break
@@ -367,12 +369,12 @@ class MPDClientBase(object):
     def _parse_stickers(self, lines):
         return dict(self._parse_raw_stickers(lines))
 
-    @mpd_commands('albumart',has_binary_payload=True,is_direct=True)
+    @mpd_commands('albumart', has_binary_payload=True, is_direct=True)
     def _albumart(self, lines):
-        return self._parse_objects_direct(lines)
-    @mpd_commands('readpicture',has_binary_payload=True,is_direct=True)
+        return self._parse_objects_direct(lines,["size"])
+    @mpd_commands('readpicture', has_binary_payload=True, is_direct=True)
     def _readpicture(self, lines):
-        return self._parse_objects_direct(lines,["type"])
+        return self._parse_objects_direct(lines, ["size","type"])
 
 ###############################################################################
 # sync client
@@ -395,12 +397,12 @@ def _create_callback(self, function, wrap_result):
     return command_callback
 
 
-def _create_command(wrapper, name, return_value, wrap_result):
+def _create_command(wrapper, name, return_value, wrap_result,has_binary_payload=False):
     """Create MPD command related function.
     """
     def mpd_command(self, *args):
         callback = _create_callback(self, return_value, wrap_result)
-        return wrapper(self, name, args, callback)
+        return wrapper(self, name, args, callback,has_binary_payload=has_binary_payload)
     return mpd_command
 
 
@@ -444,7 +446,7 @@ class MPDClient(MPDClientBase):
         self._rbfile = _NotConnected()
         self._wfile = _NotConnected()
 
-    def _send(self, command, args, retval):
+    def _send(self, command, args, retval,has_binary_payload=False):
         warnings.warn(
             "``send_{}`` is deprecated in favor of "
             "asynchronous API".format(command),
@@ -456,7 +458,7 @@ class MPDClient(MPDClientBase):
         if retval is not None:
             self._pending.append(command)
 
-    def _fetch(self, command, args, retval):
+    def _fetch(self, command, args, retval,has_binary_payload=False):
         warnings.warn(
             "``fetch_{}`` is deprecated in favor of "
             "asynchronous API".format(command),
@@ -477,7 +479,7 @@ class MPDClient(MPDClientBase):
             return retval()
         return retval
 
-    def _execute(self, command, args, retval):
+    def _execute(self, command, args, retval,has_binary_payload=False):
         if self._iterating:
             raise IteratingError(
                 "Cannot execute '{}' while iterating".format(command))
@@ -491,9 +493,10 @@ class MPDClient(MPDClientBase):
             self._write_command(command, args)
             self._command_list.append(retval)
         else:
-            #FIXME
-            if command.startswith("readpicture") or command.startswith("albumart") and len(args) < 3:
+            if has_binary_payload: # and len(args) < 3:
                 self._write_command(command, list(args)+["0"])
+                self.__cached_command = command
+                self.__cached_args = args
             else:
                 self._write_command(command, args)
 
@@ -535,11 +538,11 @@ class MPDClient(MPDClientBase):
             else:
                 parts.append('"{}"'.format(escape(encode_str(arg))))
         # Minimize logging cost if the logging is not activated.
-        #if logger.isEnabledFor(logging.DEBUG):
-        #    if command == "password":
-        #        logger.debug("Calling MPD password(******)")
-        #    else:
-        #        logger.debug("Calling MPD %s%r", command, args)
+        if logger.isEnabledFor(logging.DEBUG):
+            if command == "password":
+                logger.debug("Calling MPD password(******)")
+            else:
+                logger.debug("Calling MPD %s%r", command, args)
         cmd = " ".join(parts)
         self._write_line(cmd)
 
@@ -565,7 +568,7 @@ class MPDClient(MPDClientBase):
             return
         return line
 
-    def _read_lines(self):
+    def _read_lines(self,command=None,args=None):
         line = self._read_line()
         offset = 0
         size = 0
@@ -579,12 +582,14 @@ class MPDClient(MPDClientBase):
                 field, val = line.split(": ")
                 chunk_size = int(val)
                 binarychunk = self._read_chunk(chunk_size+1)
-                yield binarychunk[:-1]
+                yield binary_chunk(binarychunk[:-1])
                 offset += chunk_size
                 # OK after data
                 line = self._read_line()
                 if line is None and offset < size:
-                    self._write_command(result._command, list(result._args)+[offset])
+                    command = self.__cached_command
+                    args = self.__cached_args
+                    self._write_command(command, list(args)+[offset])
                     continue
 
             yield line
@@ -771,7 +776,7 @@ class MPDClient(MPDClientBase):
     @classmethod
     def add_command(cls, name, callback):
         wrap_result = callback in cls._wrap_iterator_parsers
-        method = _create_command(cls._execute, name, callback, wrap_result)
+        method = _create_command(cls._execute, name, callback, wrap_result,has_binary_payload=callback.mpd_commands_has_binary_payload)
         send_method = _create_command(cls._send, name, callback, wrap_result)
         fetch_method = _create_command(cls._fetch, name, callback, wrap_result)
         # create new mpd commands as function in three flavors:
